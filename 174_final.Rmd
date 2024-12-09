@@ -1,0 +1,164 @@
+---
+title: "174_finalproj"
+output:
+  pdf_document: default
+  html_document: default
+date: "2023-05-17"
+---
+
+```{r setup, include=FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(forecast)
+library(astsa)
+```
+
+*(1)* 
+
+Loading in Data.
+
+```{r}
+btc_data <- read.csv('data/BTC-USD.csv')
+head(btc_data)
+df1 = data.frame(date = btc_data$Date[1789:2788], adj_close = btc_data$Adj.Close[1789:2788])
+head(df1)
+```
+
+```{r}
+# Convert data frame to time series with appropriate frequency
+ts_aclose_data <- ts(df1$adj_close, start = c(2019, 8), frequency = 365)  # Assuming daily observations
+
+# Create time series data frame with ordered dates
+ts_aclose_df <- data.frame(date = as.Date(df1$date), value = ts_aclose_data)
+ts_aclose_df <- ts_aclose_df[order(ts_aclose_df$date), ]
+
+# Plot the time series
+plot(ts_aclose_df, type = "l")
+```
+
+*(2)* Transforming series to stabilize variance and ensure stationary.
+
+```{r, results = 'hide'}
+x <- ts_aclose_df
+x_series = x$value     # actual adjusted close price values
+lx = log(x$value)      # logged values to stabilize variance
+dlx = diff(lx)         # logged difference to make series stationary
+ddlx = diff(lx, 30)
+plot.ts(cbind(x_series, lx, dlx))
+```
+- Use auto.arima() on differenced log data (transformed) bc it's stationary with a zero mean --> get best (p,d,q) values based on AIC and BIC
+
+```{r}
+auto.arima(lx)
+```
+- Trying to identify seasonal components through periodograms of logged data and logged difference of data.
+- Can't see any significant peaks in the logged data, doesn't indicate seasonal components although logged differenced data shows some peaks. 
+
+```{r}
+# why is differenced logged appear to have significant peaks, whereas logged doesn't --> (differenced log makes it stationary)
+par(mfrow = c(2,1))
+mvspec(lx, kernel('daniell', 4), main = 'Logged Data')
+mvspec(dlx, kernel('daniell', 20), main = 'Logged Differenced Data')
+abline(v = c(0.22,0.31,0.475), lty = 2)
+```
+
+- Because the pacf of the logged difference data is significant at lag 4, an AR(4) model or ARIMA(4,1,0) [on logged data] may be good fits.
+- There's no significant lags at any harmonics, nothing to indicate seasonality.
+
+```{r, results = 'hide'}
+acf2(dlx, 50)
+```
+
+```{r, results = 'hide'}
+# fitting sarima with arima order specified by auto.arima() --> (ARIMA(1,0,1) on the logged difference data) which is the same as (ARIMA(1,1,1) on the logged data)
+# no seasonal component bc while looking at the PACF, only lag 4 is significant, nothing else to indicate seasonal component in time series data
+par(mfrow = c(2,1))
+f1 <- sarima(lx, 1, 1, 1, 0, 0, 0, 0)
+f1
+```
+
+- Fitting sarima with arima order specified by auto.arima() --> (ARIMA(1,0,1) on the logged difference data) which is the same as (ARIMA(1,1,1) on the logged data)
+- No seasonal component bc while looking at the PACF, only lag 4 is significant, nothing else to indicate seasonal component in time series data
+
+```{r, results = 'hide'}
+# fitting sarima with arima order (4,0,0) bc pacf is only significant at lag = 4 and nowhere else --> indicating that AR(4) may be a good fit for the logged difference
+# no seasonal component bc while looking at the PACF, only lag 4 is significant, nothing else to indicate seasonal component in time series data
+f2 <- sarima(lx, 4, 1, 0, 0, 0, 0, 0)
+f2
+```
+
+- Both models ARIMA(1,1,1) and ARIMA(4,1,0) seem to perform the about the same looking at the error statistics. We forecast using ARIMA(1,1,1) on the logged data (no seasonal component). 
+- Because there's no seasonal component, forecast doesn't show much because it's just using an ARIMA(1,1,1) to get future values. 
+
+```{r, results = 'hide'}
+sarima.for(lx, 365, 1, 1, 1, 0, 0, 0, 0)
+```
+
+```{r}
+
+```
+
+
+Checking to see if a threshold model would be adequate?
+
+```{r}
+lag1.plot(ddlx)
+```
+
+Checking squared residuals for first fit --> ARIMA(1,1,1). We can see a dependence on lag 7, which could suggest an ARCH model. 
+
+```{r}
+acf2(resid(f1$fit)^2, 20)
+```
+
+Checking squared residuals for second fit --> ARIMA(4,0,0). We can see a dependence on lag 7, which could suggest an ARCH model. 
+
+```{r}
+acf2(resid(f2$fit)^2, 20)
+```
+
+*ARMA(1,1) on dlx and GARCH(7,0) model on the residuals of the differenced log data:*
+- Significant coefficients- ARMA(1,1) model on the series: AR(1), MA(1)
+- Significant coefficients- GARCH(7,0) model on the residuals: omega, alpha4 (4th lag)
+
+*Conclusion from ARMA(1,1) + GARCH(7,0):*
+- Constant in ARIMA(1,1,1) isn't significant, ar and ma coefficients are significant
+- Constant in GARCH(7,0) model on the residuals is significant, alpha4 is significant
+  - *Interpretation:* When raised to the second power, the residuals are dependent on the 4th lag only?
+  - Variance follows: $\sigma_t^{2} = \omega + \alpha_4\epsilon_{t-4}^2$
+
+```{r}
+library(fGarch)
+g_fit1 <- garchFit(~arma(1,1) + garch(7,0), dlx)
+summary(g_fit1)
+```
+
+*ARMA(1,1) on dlx and GARCH(1,1) model on the residuals of the differenced log data:*
+- Significant coefficients- ARMA(1,1) model on the series: AR(1), MA(1)
+- Significant coefficients- GARCH(1,1) model on the residuals: omega, a1, b1
+
+*Conclusion from ARMA(1,1) + GARCH(1,1):*
+- Constant in ARIMA(1,1,1) isn't significant, ar and ma coefficients are significant
+- Constant in GARCH(1,0) model on the residuals is significant, alpha1 is significant, beta1 is significant 
+  - *Interpretation:* variance follows this model $\sigma_t^{2} = \omega + \alpha_1\epsilon_{t-1}^2 + \beta_1\sigma_{t-1}^2$
+
+```{r}
+g_fit2 <- garchFit(~arma(1,1) + garch(1,1), dlx)
+summary(g_fit2)
+```
+
+Using ARIMA(1,1,1) and GARCH(1,1) gives lowest AIC, BIC. Will use it to forecast variance
+
+```{r}
+g_forecast <- predict(g_fit2, n.ahead = 365)
+plot.ts(g_forecast$standardDeviation^2) 
+#lines(time(dlx), g_forecast$meanForecast, col = 'red')
+```
+
+Suggests long memory?
+
+Can also use VAR(X) because we have other metrics over time as well, maybe
+
+```{r}
+acf2(lx)
+```
+
